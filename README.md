@@ -1,5 +1,13 @@
 # AI Hospital Operating System
-
+![Python](https://img.shields.io/badge/Python-3.10-blue)
+![SQL](https://img.shields.io/badge/Database-PostgreSQL-blue)
+![SAS](https://img.shields.io/badge/SAS-ETL-orange)
+![PyTorch](https://img.shields.io/badge/DeepLearning-PyTorch-red)
+![Streamlit](https://img.shields.io/badge/Dashboard-Streamlit-green)
+![Airflow](https://img.shields.io/badge/Orchestration-Airflow-purple)
+![Docker](https://img.shields.io/badge/Deployment-Docker-blue)
+![MLflow](https://img.shields.io/badge/ExperimentTracking-MLflow-lightblue)
+![License](https://img.shields.io/badge/License-MIT-green)
 A production-grade, AI-powered clinical decision support platform for ICU monitoring,
 early deterioration detection, risk stratification, NLP note analysis, and interoperability.
 
