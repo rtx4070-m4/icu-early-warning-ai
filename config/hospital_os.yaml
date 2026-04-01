@@ -1,0 +1,93 @@
+# AI Hospital OS — Default Configuration
+# Override any value with: HOSPITAL_OS__SECTION__KEY=value
+# Or with a local config:   cp config/hospital_os.yaml config/local.yaml
+
+environment: development
+log_level: INFO
+version: "1.0.0"
+
+database:
+  host: localhost
+  port: 5432
+  name: hospital_os
+  user: hospital
+  password: ""          # Use DB_PASSWORD env var in production
+  pool_size: 10
+  max_overflow: 20
+  connect_timeout: 10
+
+ml:
+  model_dir: /data/models
+  retrain_schedule: "0 2 * * *"     # Daily 02:00 UTC
+  min_auc_for_promotion: 0.80
+  sepsis_alert_threshold: 0.55
+  mortality_alert_threshold: 0.40
+  cardiac_alert_threshold: 0.45
+  lstm_sequence_length: 24
+  lstm_hidden_size: 64
+  lstm_n_layers: 2
+  anomaly_contamination: 0.08
+  feature_window_hours: 6
+  batch_size: 64
+  max_train_epochs: 50
+  early_stopping_patience: 7
+  device: cpu              # cpu | cuda
+
+alerts:
+  news2_warning_threshold: 5
+  news2_urgent_threshold: 7
+  news2_critical_threshold: 9
+  qsofa_alert_threshold: 2
+  shock_index_threshold: 1.0
+  lactate_alert_mmol: 2.0
+  map_critical_mmhg: 65.0
+  alert_cooldown_minutes: 10
+  max_alerts_per_patient_per_hour: 5
+  send_sms: false
+  send_email: false
+  sms_endpoint: ""
+  email_recipients: []
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8050
+  refresh_interval_ms: 5000
+  max_patients_displayed: 20
+  vital_history_hours: 24
+  debug_mode: false
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  rate_limit_per_minute: 120
+  enable_cors: true
+  allowed_origins:
+    - "*"
+  jwt_secret: "change_in_production"   # Use API_JWT_SECRET env var
+  token_expiry_minutes: 480
+
+mlflow:
+  tracking_uri: "sqlite:///mlruns.db"
+  artifact_root: /data/mlflow/artifacts
+  experiment_prefix: Hospital_OS
+  auto_log: true
+
+security:
+  audit_log_dir: /data/audit
+  session_timeout_minutes: 480
+  require_2fa: false
+  password_min_length: 12
+  max_login_attempts: 5
+  lockout_minutes: 30
+  phi_deidentify_exports: true
+  encrypt_at_rest: false
+
+data:
+  raw_dir: /data/raw
+  clean_dir: /data/clean
+  features_dir: /data/features
+  reports_dir: /data/reports
+  backup_dir: /data/backup
+  max_vitals_history_days: 30
+  synthetic_data_fallback: true

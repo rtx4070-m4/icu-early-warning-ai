@@ -1,0 +1,240 @@
+name: AI Hospital OS — CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * *'   # Nightly regression
+
+env:
+  PYTHON_VERSION: '3.11'
+  DB_HOST: localhost
+  DB_PORT: 5432
+  DB_NAME: hospital_os_test
+  DB_USER: hospital
+  DB_PASSWORD: test_password
+  MLFLOW_TRACKING_URI: sqlite:///mlruns_test.db
+  HOSPITAL_OS_ENV: test
+
+jobs:
+  # ── Lint & Type Check ────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install flake8 mypy black isort
+      - name: Black (format check)
+        run: black --check --line-length=100 . --exclude="/__pycache__|/\.git|/venv/"
+        continue-on-error: true
+      - name: Flake8 (linting)
+        run: |
+          flake8 . --max-line-length=120 \
+            --exclude=__pycache__,.git,venv,*.pyc \
+            --ignore=E501,W503,E203,F401
+        continue-on-error: true
+      - name: isort (import order)
+        run: isort --check-only --diff . --skip __pycache__ --skip venv
+        continue-on-error: true
+
+  # ── Unit Tests ───────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install core dependencies
+        run: |
+          pip install --upgrade pip
+          pip install numpy pandas scipy scikit-learn networkx joblib
+          pip install pytest pytest-cov pytest-timeout
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/test_models.py \
+            -v --tb=short \
+            --timeout=120 \
+            --cov=. \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            -x
+      - name: Upload coverage
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: unit-tests
+
+  # ── Integration Tests ────────────────────────────────────────────────────────
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install numpy pandas scipy scikit-learn networkx joblib
+          pip install pytest pytest-timeout
+      - name: Run integration tests
+        run: |
+          python -m pytest integration_tests/test_integration.py \
+            -v --tb=short --timeout=180
+      - name: Run system demo (smoke test)
+        run: |
+          python demo/system_demo.py
+        timeout-minutes: 5
+
+  # ── Model Evaluation ─────────────────────────────────────────────────────────
+  model-evaluation:
+    name: Model Evaluation
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install numpy pandas scipy scikit-learn networkx
+      - name: Run evaluation suite
+        run: |
+          python -c "
+          import sys; sys.path.insert(0,'.')
+          from evaluation.model_evaluator import EvaluationSuite
+          import tempfile, json
+          with tempfile.TemporaryDirectory() as d:
+              suite = EvaluationSuite()
+              results = suite.run_all(output_dir=d, backtest_windows=6)
+              overall = results['overall']
+              print(f'Models passing: {overall[\"n_pass\"]}/{overall[\"n_models\"]}')
+              print(f'Pass rate: {overall[\"pass_rate\"]:.0%}')
+              if not overall['all_pass']:
+                  failing = [t for t,d in results['models'].items() if not d['evaluation']['pass_criteria']]
+                  print(f'FAILING: {failing}')
+                  sys.exit(1)
+          print('All models pass evaluation criteria')
+          "
+
+  # ── Benchmark Regression ─────────────────────────────────────────────────────
+  benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install numpy pandas scipy scikit-learn networkx
+      - name: Run benchmarks (key modules only)
+        run: |
+          python -c "
+          import sys; sys.path.insert(0,'.')
+          from benchmarks.system_benchmarks import run_benchmark
+          from nlp_pipeline.medical_ner import MedicalNER
+          from knowledge_graph.graph_builder import MedicalKnowledgeGraph
+          from fhir_integration.fhir_client import FHIRBuilder
+
+          ner = MedicalNER()
+          note = 'septic shock vancomycin HR 118 BP 82/54 lactate 3.9'
+          r1 = run_benchmark('NER', lambda: ner.process(note), n=200, warmup=5)
+          assert r1.p95_ms < 10, f'NER p95 {r1.p95_ms:.1f}ms exceeds 10ms budget'
+          print(f'NER: p50={r1.p50_ms:.1f}ms p95={r1.p95_ms:.1f}ms {r1.throughput_per_sec:.0f}/s ✓')
+
+          kg = MedicalKnowledgeGraph()
+          r2 = run_benchmark('KG DDx', lambda: kg.differential_diagnosis(['fever','hypotension']), n=200)
+          assert r2.p95_ms < 20, f'KG DDx p95 {r2.p95_ms:.1f}ms exceeds 20ms'
+          print(f'KG DDx: p50={r2.p50_ms:.1f}ms p95={r2.p95_ms:.1f}ms {r2.throughput_per_sec:.0f}/s ✓')
+
+          b = FHIRBuilder()
+          r3 = run_benchmark('FHIR', lambda: b.vital_bundle('T',{'heart_rate':88,'sbp':120}), n=500)
+          assert r3.p95_ms < 5, f'FHIR p95 {r3.p95_ms:.1f}ms exceeds 5ms'
+          print(f'FHIR: p50={r3.p50_ms:.1f}ms p95={r3.p95_ms:.1f}ms {r3.throughput_per_sec:.0f}/s ✓')
+          print('All benchmark assertions PASSED')
+          "
+
+  # ── Docker Build ─────────────────────────────────────────────────────────────
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Docker image
+        run: |
+          docker build -f docker/Dockerfile -t ai-hospital-os:${{ github.sha }} .
+      - name: Test container starts
+        run: |
+          docker run --rm -e HOSPITAL_OS_ENV=test \
+            ai-hospital-os:${{ github.sha }} \
+            python -c "from config.config_manager import get_config; print('Container OK:', get_config().environment)"
+
+  # ── Security Scan ────────────────────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install bandit safety
+      - name: Bandit (SAST)
+        run: |
+          bandit -r . -x ./.git,./venv,./tests,./integration_tests \
+            --severity-level medium -f json -o bandit-report.json || true
+          python -c "
+          import json
+          with open('bandit-report.json') as f:
+              d = json.load(f)
+          highs = [i for i in d.get('results',[]) if i['issue_severity']=='HIGH']
+          print(f'Bandit: {len(d.get(\"results\",[]))} issues, {len(highs)} HIGH severity')
+          if highs:
+              for h in highs[:3]:
+                  print(f'  HIGH: {h[\"issue_text\"]} ({h[\"filename\"]}:{h[\"line_number\"]})')
+          "
+        continue-on-error: true
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: bandit-report.json
+        continue-on-error: true
+
+  # ── Notify ───────────────────────────────────────────────────────────────────
+  notify:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, model-evaluation]
+    if: always()
+    steps:
+      - name: Report status
+        run: |
+          echo "Unit tests:        ${{ needs.unit-tests.result }}"
+          echo "Integration tests: ${{ needs.integration-tests.result }}"
+          echo "Model evaluation:  ${{ needs.model-evaluation.result }}"

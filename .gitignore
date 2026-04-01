@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# Data (large files — track schema/seeds only)
+/data/
+mlruns/
+mlruns.db
+*.parquet
+*.feather
+
+# Models
+*.pkl
+*.pt
+*.pth
+*.joblib
+*.onnx
+
+# Reports & logs
+/reports/
+*.log
+audit_*.jsonl
+
+# IDE
+.idea/
+.vscode/
+*.sublime-project
+
+# macOS
+.DS_Store
+
+# Docker
+.dockerignore
+
+# Coverage
+htmlcov/
+.coverage
+coverage.xml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb

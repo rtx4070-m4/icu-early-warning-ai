@@ -1,0 +1,213 @@
+version: "3.9"
+
+# =============================================================================
+# AI Hospital OS — Full Stack
+# Services: PostgreSQL · MLflow · Dash Dashboard · Airflow · Redis
+# =============================================================================
+
+x-env-common: &env-common
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: hospital_os
+  DB_USER: hospital
+  DB_PASSWORD: "${DB_PASSWORD:-change_in_production}"
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  MLFLOW_ARTIFACT_ROOT: /data/mlflow/artifacts
+  PYTHONPATH: /app
+
+services:
+
+  # ── PostgreSQL (EHR Database) ───────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: hospital_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hospital_os
+      POSTGRES_USER: hospital
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-change_in_production}"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./database/seed_data.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hospital -d hospital_os"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (Celery broker for Airflow) ──────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: hospital_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── MLflow (Experiment Tracking) ───────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.11.1
+    container_name: hospital_mlflow
+    restart: unless-stopped
+    environment:
+      <<: *env-common
+    command: >
+      mlflow server
+        --backend-store-uri postgresql://hospital:${DB_PASSWORD:-change_in_production}@postgres:5432/hospital_os
+        --default-artifact-root /data/mlflow/artifacts
+        --host 0.0.0.0
+        --port 5000
+    volumes:
+      - mlflow_artifacts:/data/mlflow/artifacts
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ── ICU Dashboard ──────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: hospital_dashboard
+    restart: unless-stopped
+    environment:
+      <<: *env-common
+    command: python /app/hospital_os/dashboard/hospital_dashboard.py
+    volumes:
+      - data_volume:/data
+      - ..:/app/hospital_os:ro
+    ports:
+      - "8050:8050"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8050"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  # ── Real-Time Vitals Processor ─────────────────────────────────────────────
+  vitals_processor:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: hospital_vitals
+    restart: unless-stopped
+    environment:
+      <<: *env-common
+    command: python /app/hospital_os/real_time_monitoring/vitals_stream_processor.py
+    volumes:
+      - data_volume:/data
+      - ..:/app/hospital_os:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Airflow Webserver ──────────────────────────────────────────────────────
+  airflow_webserver:
+    image: apache/airflow:2.9.0-python3.11
+    container_name: hospital_airflow_web
+    restart: unless-stopped
+    environment:
+      <<: *env-common
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://hospital:${DB_PASSWORD:-change_in_production}@postgres:5432/hospital_os"
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: "db+postgresql://hospital:${DB_PASSWORD:-change_in_production}@postgres:5432/hospital_os"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstY=}"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_SECRET_KEY:-hospital_os_secret}"
+      AIRFLOW__CORE__DAGS_FOLDER: /app/hospital_os/orchestration
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    command: webserver
+    volumes:
+      - data_volume:/data
+      - ..:/app/hospital_os:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  # ── Airflow Scheduler ──────────────────────────────────────────────────────
+  airflow_scheduler:
+    image: apache/airflow:2.9.0-python3.11
+    container_name: hospital_airflow_scheduler
+    restart: unless-stopped
+    environment:
+      <<: *env-common
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://hospital:${DB_PASSWORD:-change_in_production}@postgres:5432/hospital_os"
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: "db+postgresql://hospital:${DB_PASSWORD:-change_in_production}@postgres:5432/hospital_os"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstY=}"
+      AIRFLOW__CORE__DAGS_FOLDER: /app/hospital_os/orchestration
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    command: scheduler
+    volumes:
+      - data_volume:/data
+      - ..:/app/hospital_os:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Airflow Worker ─────────────────────────────────────────────────────────
+  airflow_worker:
+    image: apache/airflow:2.9.0-python3.11
+    container_name: hospital_airflow_worker
+    restart: unless-stopped
+    environment:
+      <<: *env-common
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://hospital:${DB_PASSWORD:-change_in_production}@postgres:5432/hospital_os"
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: "db+postgresql://hospital:${DB_PASSWORD:-change_in_production}@postgres:5432/hospital_os"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstY=}"
+      AIRFLOW__CORE__DAGS_FOLDER: /app/hospital_os/orchestration
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    command: celery worker
+    volumes:
+      - data_volume:/data
+      - ..:/app/hospital_os:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pg_data:
+    driver: local
+  mlflow_artifacts:
+    driver: local
+  data_volume:
+    driver: local
+
+networks:
+  default:
+    name: hospital_os_network
