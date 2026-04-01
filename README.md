@@ -3,7 +3,6 @@
 A production-grade, AI-powered clinical decision support platform for ICU monitoring,
 early deterioration detection, risk stratification, NLP note analysis, and interoperability.
 
-> ⚠️ **Clinical Disclaimer** — Research prototype only. Not validated for clinical use.
 
 ---
 
